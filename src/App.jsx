@@ -20,8 +20,9 @@ const STR = {
     item: 'البيان (ما تم شراؤه)', vendor: 'المتجر / المورّد (اختياري)', price: 'السعر',
     deliveryOpt: 'قيمة الشحن (إن وُجد)', hasInvoice: 'توجد فاتورة',
     given: 'المبلغ المُسلَّم (اختياري)', change: 'المبلغ المتبقّي (اختياري)',
-    whoPaid: '— من دفع (اختياري) —', photo: 'صورة الفاتورة أو المنتج', picked: 'تم اختيار:',
-    receipt: 'عرض الفاتورة', noReceipt: 'لا توجد فاتورة', given_s: 'مُسلَّم', change_s: 'متبقٍّ',
+    whoPaid: '— من دفع (اختياري) —', photo: 'صور الفاتورة أو المنتج (تقدر تختار أكتر من صورة)', picked: 'تم اختيار:',
+    photos: 'صور', existing: 'الصور الحالية', receipt: 'عرض الصور', noReceipt: 'لا توجد صور',
+    given_s: 'مُسلَّم', change_s: 'متبقٍّ',
     emptyMembers: 'لا يوجد أعضاء بعد', emptyContribs: 'لا توجد مساهمات بعد', emptyExpenses: 'لا توجد مصروفات بعد',
     loading: 'جارٍ التحميل…', badLogin: 'بيانات الدخول غير صحيحة',
     footView: 'وضع العرض', footAdmin: 'وضع المشرف', currency: 'ج.م',
@@ -41,8 +42,9 @@ const STR = {
     item: 'Item (what was bought)', vendor: 'Vendor / store (optional)', price: 'Price',
     deliveryOpt: 'Delivery cost (if any)', hasInvoice: 'Has an invoice',
     given: 'Amount given (optional)', change: 'Change returned (optional)',
-    whoPaid: '— Paid by (optional) —', photo: 'Receipt or item photo', picked: 'Selected:',
-    receipt: 'View receipt', noReceipt: 'No receipt', given_s: 'given', change_s: 'change',
+    whoPaid: '— Paid by (optional) —', photo: 'Receipt or item photos (you can pick several)', picked: 'Selected:',
+    photos: 'photos', existing: 'Current photos', receipt: 'View photos', noReceipt: 'No photos',
+    given_s: 'given', change_s: 'change',
     emptyMembers: 'No members yet', emptyContribs: 'No contributions yet', emptyExpenses: 'No expenses yet',
     loading: 'Loading…', badLogin: 'Incorrect email or password',
     footView: 'View mode', footAdmin: 'Admin mode', currency: 'EGP',
@@ -55,6 +57,8 @@ const fmt = (n) => (Number(n) || 0).toLocaleString('en-US', { maximumFractionDig
 const numOrNull = (v) => (v === '' || v == null ? null : Number(v))
 const strOrNull = (v) => (v && String(v).trim() !== '' ? String(v).trim() : null)
 const today = () => new Date().toISOString().slice(0, 10)
+// بيرجّع مصفوفة الصور سواء البيانات قديمة (صورة واحدة) أو جديدة (مصفوفة)
+const photosOf = (e) => (e.receipt_urls && e.receipt_urls.length ? e.receipt_urls : (e.receipt_url ? [e.receipt_url] : []))
 
 async function compressImage(file, maxDim = 1400, quality = 0.7) {
   const dataUrl = await new Promise((res, rej) => {
@@ -70,12 +74,18 @@ async function compressImage(file, maxDim = 1400, quality = 0.7) {
   c.getContext('2d').drawImage(img, 0, 0, width, height)
   return await new Promise((res) => c.toBlob(res, 'image/jpeg', quality))
 }
-async function uploadReceipt(file) {
+async function uploadOne(file) {
   const blob = await compressImage(file)
   const nm = `${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`
   const { error } = await supabase.storage.from('receipts').upload(nm, blob, { contentType: 'image/jpeg' })
   if (error) throw error
   return supabase.storage.from('receipts').getPublicUrl(nm).data.publicUrl
+}
+// يرفع كذا ملف ويرجّع مصفوفة روابط
+async function uploadMany(files) {
+  const urls = []
+  for (const f of files) urls.push(await uploadOne(f))
+  return urls
 }
 
 export default function App() {
@@ -286,6 +296,7 @@ export default function App() {
           {expenses.map((e) => {
             const hasDelivery = Number(e.delivery_amount) > 0
             const grand = Number(e.amount) + Number(e.delivery_amount || 0)
+            const pics = photosOf(e)
             return (
               <div className="exp" key={e.id}>
                 <div className="exp-top">
@@ -327,13 +338,14 @@ export default function App() {
                 </div>
 
                 <div className="exp-foot">
-                  {e.receipt_url ? (
-                    <>
-                      <a className="rlink" href={e.receipt_url} target="_blank" rel="noreferrer">{t.receipt}</a>
-                      <a href={e.receipt_url} target="_blank" rel="noreferrer">
-                        <img className="thumb" src={e.receipt_url} alt="" />
-                      </a>
-                    </>
+                  {pics.length > 0 ? (
+                    <div className="thumbs">
+                      {pics.map((url, i) => (
+                        <a key={i} href={url} target="_blank" rel="noreferrer">
+                          <img className="thumb" src={url} alt="" />
+                        </a>
+                      ))}
+                    </div>
                   ) : (
                     <span className="no-receipt">{t.noReceipt}</span>
                   )}
@@ -431,7 +443,11 @@ function ContributionForm({ t, members, initial, onDone, onCancel }) {
 
 function ExpenseForm({ t, members, initial, onDone, onCancel }) {
   const editing = !!initial?.id
-  const [busy, setBusy] = useState(false); const [file, setFile] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [files, setFiles] = useState([])   // صور جديدة هتتضاف
+  const existing = (initial?.receipt_urls && initial.receipt_urls.length)
+    ? initial.receipt_urls : (initial?.receipt_url ? [initial.receipt_url] : [])
+  const [keep, setKeep] = useState(existing)  // الصور القديمة اللي هنبقيها
   const [f, setF] = useState({
     title: initial?.title || '', vendor: initial?.vendor || '', amount: initial?.amount ?? '',
     delivery_amount: initial?.delivery_amount ?? '', method: initial?.method || 'cash',
@@ -440,17 +456,21 @@ function ExpenseForm({ t, members, initial, onDone, onCancel }) {
     note: initial?.note || '', spent_at: initial?.spent_at || today(),
   })
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }))
+  const removeKept = (url) => setKeep((k) => k.filter((u) => u !== url))
+
   const save = async () => {
     if (!f.title.trim() || f.amount === '') return
     setBusy(true)
     try {
-      let receipt_url = initial?.receipt_url || null
-      if (file) receipt_url = await uploadReceipt(file)
+      const newUrls = files.length ? await uploadMany(files) : []
+      const receipt_urls = [...keep, ...newUrls]
       const payload = {
         title: f.title.trim(), vendor: strOrNull(f.vendor), amount: Number(f.amount),
         delivery_amount: Number(f.delivery_amount || 0), method: f.method, has_invoice: f.has_invoice,
         amount_given: numOrNull(f.amount_given), change_returned: numOrNull(f.change_returned),
-        paid_by: f.paid_by || null, receipt_url, note: strOrNull(f.note), spent_at: f.spent_at,
+        paid_by: f.paid_by || null, receipt_urls,
+        receipt_url: receipt_urls[0] || null,   // نحدّث القديم كمان للتوافق
+        note: strOrNull(f.note), spent_at: f.spent_at,
       }
       if (editing) await supabase.from('expenses').update(payload).eq('id', initial.id)
       else await supabase.from('expenses').insert(payload)
@@ -481,10 +501,26 @@ function ExpenseForm({ t, members, initial, onDone, onCancel }) {
         {members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
       </select>
       <input type="date" value={f.spent_at} onChange={(e) => set('spent_at', e.target.value)} />
+
+      {keep.length > 0 && (
+        <div className="keep-photos">
+          <small className="eyebrow">{t.existing}</small>
+          <div className="thumbs">
+            {keep.map((url) => (
+              <span className="kept" key={url}>
+                <img className="thumb" src={url} alt="" />
+                <button type="button" className="kept-x" onClick={() => removeKept(url)}>✕</button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <label className="file">📷 {t.photo}
-        <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files[0] || null)} />
+        <input type="file" accept="image/*" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
       </label>
-      {file && <small className="picked">{t.picked} {file.name}</small>}
+      {files.length > 0 && <small className="picked">{t.picked} {files.length} {t.photos}</small>}
+
       <input placeholder={t.note} value={f.note} onChange={(e) => set('note', e.target.value)} />
       <div className="form-actions">
         <button className="btn sm" onClick={save} disabled={busy}>{busy ? t.saving : t.save}</button>
